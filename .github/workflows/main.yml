@@ -19,7 +19,7 @@ jobs:
         run: |
           mkdir -p proj && cd proj
           mkdir -p app
-          cat > app/build.gradle.kts <<'FILE_END_0'
+          cat > app/build.gradle.kts <<'F0'
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
@@ -46,9 +46,9 @@ jobs:
               }
               kotlinOptions { jvmTarget = "17" }
           }
-          FILE_END_0
+          F0
           mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml <<'FILE_END_1'
+          cat > app/src/main/AndroidManifest.xml <<'F1'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -61,6 +61,7 @@ jobs:
 
                   <activity
                       android:name=".MainActivity"
+                      android:launchMode="singleTop"
                       android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -80,18 +81,18 @@ jobs:
                   </receiver>
               </application>
           </manifest>
-          FILE_END_1
+          F1
           mkdir -p app/src/main/java/com/kja/webwidget
-          cat > app/src/main/java/com/kja/webwidget/Config.kt <<'FILE_END_2'
+          cat > app/src/main/java/com/kja/webwidget/Config.kt <<'F2'
           package com.kja.webwidget
 
           object Config {
               // 위젯에 띄울 주소. 바꾸고 싶으면 여기만 수정하면 됩니다.
               const val URL = "https://kja5046.github.io/testify/3/cal.html"
           }
-          FILE_END_2
+          F2
           mkdir -p app/src/main/java/com/kja/webwidget
-          cat > app/src/main/java/com/kja/webwidget/MainActivity.kt <<'FILE_END_3'
+          cat > app/src/main/java/com/kja/webwidget/MainActivity.kt <<'F3'
           package com.kja.webwidget
 
           import android.app.Activity
@@ -99,21 +100,65 @@ jobs:
           import android.os.Bundle
           import android.webkit.WebView
           import android.webkit.WebViewClient
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
 
           class MainActivity : Activity() {
+              companion object {
+                  const val EXTRA_ADD_TODAY = "add_today"
+              }
+
               private lateinit var web: WebView
+              private var openTodayOnLoad = false
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  openTodayOnLoad = intent.getBooleanExtra(EXTRA_ADD_TODAY, false)
                   web = WebView(this).apply {
                       settings.javaScriptEnabled = true
                       settings.domStorageEnabled = true
-                      webViewClient = WebViewClient()
+                      webViewClient = object : WebViewClient() {
+                          override fun onPageFinished(view: WebView, url: String) {
+                              if (openTodayOnLoad) {
+                                  openTodayOnLoad = false
+                                  openTodayModal()
+                              }
+                          }
+                      }
                   }
                   setContentView(web)
                   web.loadUrl(Config.URL)
+              }
 
-                  // 앱을 열 때 위젯도 함께 새로고침
+              // 위젯에서 다시 열면 위젯에서 지운 내용까지 반영되도록 새로 불러온다
+              override fun onNewIntent(intent: Intent) {
+                  super.onNewIntent(intent)
+                  if (intent.getBooleanExtra(EXTRA_ADD_TODAY, false)) {
+                      openTodayOnLoad = true
+                      web.reload()
+                  }
+              }
+
+              override fun onRestart() {
+                  super.onRestart()
+                  if (!openTodayOnLoad) web.reload()
+              }
+
+              // 오늘 날짜의 to do list 창을 바로 연다
+              private fun openTodayModal() {
+                  val today = JSONObject.quote(SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()))
+                  web.evaluateJavascript(
+                      "try { selectedDate = $today; updateTaskListUI();" +
+                          " modal.style.display = 'flex'; taskInput.focus(); } catch (e) {}",
+                      null
+                  )
+              }
+
+              // 앱에서 할 일을 고치고 나가면 위젯도 바로 갱신
+              override fun onPause() {
+                  super.onPause()
                   sendBroadcast(
                       Intent(this, WebWidgetProvider::class.java)
                           .setAction(WebWidgetProvider.ACTION_REFRESH)
@@ -130,9 +175,9 @@ jobs:
                   super.onDestroy()
               }
           }
-          FILE_END_3
+          F3
           mkdir -p app/src/main/java/com/kja/webwidget
-          cat > app/src/main/java/com/kja/webwidget/WebWidgetProvider.kt <<'FILE_END_4'
+          cat > app/src/main/java/com/kja/webwidget/WebWidgetProvider.kt <<'F4'
           package com.kja.webwidget
 
           import android.appwidget.AppWidgetManager
@@ -140,232 +185,361 @@ jobs:
           import android.content.ComponentName
           import android.content.Context
           import android.content.Intent
-          import android.os.Bundle
 
           class WebWidgetProvider : AppWidgetProvider() {
 
               companion object {
                   const val ACTION_REFRESH = "com.kja.webwidget.ACTION_REFRESH"
+                  const val ACTION_DELETE = "com.kja.webwidget.ACTION_DELETE"
+                  const val EXTRA_DATE = "date"
+                  const val EXTRA_TEXT = "text"
               }
 
               override fun onReceive(context: Context, intent: Intent) {
-                  if (intent.action == ACTION_REFRESH) {
-                      val manager = AppWidgetManager.getInstance(context)
-                      val ids = manager.getAppWidgetIds(ComponentName(context, WebWidgetProvider::class.java))
-                      renderAll(context, ids)
-                  } else {
-                      super.onReceive(context, intent)
+                  when (intent.action) {
+                      ACTION_REFRESH -> refresh(context, null)
+                      ACTION_DELETE -> {
+                          val date = intent.getStringExtra(EXTRA_DATE)
+                          val text = intent.getStringExtra(EXTRA_TEXT)
+                          refresh(context, if (date != null && text != null) Pair(date, text) else null)
+                      }
+                      else -> super.onReceive(context, intent)
                   }
               }
 
               override fun onUpdate(context: Context, appWidgetManager: AppWidgetManager, appWidgetIds: IntArray) {
-                  renderAll(context, appWidgetIds)
+                  refresh(context, null)
               }
 
-              override fun onAppWidgetOptionsChanged(
-                  context: Context,
-                  appWidgetManager: AppWidgetManager,
-                  appWidgetId: Int,
-                  newOptions: Bundle
-              ) {
-                  // 위젯 크기를 바꾸면 새 크기에 맞춰 다시 그림
-                  renderAll(context, intArrayOf(appWidgetId))
-              }
-
-              private fun renderAll(context: Context, ids: IntArray) {
+              private fun refresh(context: Context, delete: Pair<String, String>?) {
+                  val manager = AppWidgetManager.getInstance(context)
+                  val ids = manager.getAppWidgetIds(ComponentName(context, WebWidgetProvider::class.java))
                   if (ids.isEmpty()) return
                   val pending = goAsync()
-                  val appContext = context.applicationContext
-                  var remaining = ids.size
-                  for (id in ids) {
-                      WidgetRenderer.render(appContext, id) {
-                          remaining -= 1
-                          if (remaining == 0) pending.finish()
-                      }
-                  }
+                  WidgetRenderer.renderAll(context.applicationContext, ids, delete) { pending.finish() }
               }
           }
-          FILE_END_4
+          F4
           mkdir -p app/src/main/java/com/kja/webwidget
-          cat > app/src/main/java/com/kja/webwidget/WidgetRenderer.kt <<'FILE_END_5'
+          cat > app/src/main/java/com/kja/webwidget/WidgetRenderer.kt <<'F5'
           package com.kja.webwidget
 
+          import android.app.AlarmManager
           import android.app.PendingIntent
           import android.appwidget.AppWidgetManager
           import android.content.Context
           import android.content.Intent
-          import android.content.res.Configuration
-          import android.graphics.Bitmap
-          import android.graphics.Canvas
-          import android.graphics.Color
           import android.os.Handler
           import android.os.Looper
           import android.view.View
           import android.webkit.WebView
           import android.webkit.WebViewClient
           import android.widget.RemoteViews
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Date
+          import java.util.Locale
 
           /**
-           * 화면에 보이지 않는 WebView로 페이지를 불러와 이미지로 찍은 뒤
-           * 그 이미지를 위젯에 표시한다. (위젯 안에는 WebView를 직접 넣을 수 없음)
+           * cal.html의 할 일(localStorage 'pink_notion_final')을 읽어
+           * 오늘 날짜 것만 cal.html의 to do list 창과 같은 모양으로 보여준다.
+           * ✕ 를 누르면 cal.html에서 지울 때와 똑같이 그 할 일이 삭제된다.
            */
           object WidgetRenderer {
-              private const val SETTLE_DELAY_MS = 1500L // 페이지 로드 후 JS가 그릴 시간
-              private const val TIMEOUT_MS = 8000L
+              private const val ORIGIN = "https://kja5046.github.io/"
+              private const val MAX_ROWS = 8
+              private const val TIMEOUT_MS = 6000L
               private val handler = Handler(Looper.getMainLooper())
 
-              fun render(context: Context, widgetId: Int, onDone: () -> Unit) {
-                  val manager = AppWidgetManager.getInstance(context)
-                  try {
-                      showStatus(context, manager, widgetId, context.getString(R.string.loading))
+              fun renderAll(context: Context, ids: IntArray, delete: Pair<String, String>?, onDone: () -> Unit) {
+                  val today = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+                  var finished = false
+                  var webView: WebView? = null
 
-                      val (width, height) = widgetSizePx(context, manager, widgetId)
-                      val webView = WebView(context).apply {
+                  fun finish(tasks: List<String>?) {
+                      if (finished) return
+                      finished = true
+                      try {
+                          val manager = AppWidgetManager.getInstance(context)
+                          val views = buildViews(context, today, tasks)
+                          for (id in ids) manager.updateAppWidget(id, views)
+                          scheduleMidnightRefresh(context)
+                      } finally {
+                          webView?.destroy()
+                          onDone()
+                      }
+                  }
+
+                  val deleteJs = if (delete == null) "" else """
+                      var td = ${JSONObject.quote(delete.first)}, tt = ${JSONObject.quote(delete.second)};
+                      var ta = ev[td] || []; var ti = ta.indexOf(tt);
+                      if (ti >= 0) {
+                        ta.splice(ti, 1);
+                        if (ta.length) ev[td] = ta; else delete ev[td];
+                        localStorage.setItem('pink_notion_final', JSON.stringify(ev));
+                      }
+                  """
+                  val script = """
+                      (function() {
+                        var ev = JSON.parse(localStorage.getItem('pink_notion_final') || '{}');
+                        $deleteJs
+                        return JSON.stringify(ev[${JSONObject.quote(today)}] || []);
+                      })()
+                  """
+
+                  try {
+                      webView = WebView(context).apply {
                           settings.javaScriptEnabled = true
                           settings.domStorageEnabled = true
-                          setBackgroundColor(Color.WHITE)
-                          setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                          measure(
-                              View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                              View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
-                          )
-                          layout(0, 0, width, height)
-                      }
-
-                      var finished = false
-                      lateinit var capture: Runnable
-                      capture = Runnable {
-                          if (finished) return@Runnable
-                          finished = true
-                          try {
-                              val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                              val canvas = Canvas(bitmap)
-                              canvas.drawColor(Color.WHITE)
-                              webView.draw(canvas)
-                              pushBitmap(context, manager, widgetId, bitmap)
-                          } catch (e: Exception) {
-                              showStatus(context, manager, widgetId, context.getString(R.string.failed))
-                          } finally {
-                              handler.removeCallbacks(capture)
-                              webView.stopLoading()
-                              webView.destroy()
-                              onDone()
+                          webViewClient = object : WebViewClient() {
+                              override fun onPageFinished(view: WebView, url: String) {
+                                  view.evaluateJavascript(script) { result -> finish(parse(result)) }
+                              }
                           }
                       }
-
-                      webView.webViewClient = object : WebViewClient() {
-                          override fun onPageFinished(view: WebView, url: String) {
-                              handler.postDelayed(capture, SETTLE_DELAY_MS)
-                          }
-                      }
-                      handler.postDelayed(capture, TIMEOUT_MS)
-                      webView.loadUrl(Config.URL)
+                      handler.postDelayed({ finish(null) }, TIMEOUT_MS)
+                      webView.loadDataWithBaseURL(ORIGIN, "<html></html>", "text/html", "UTF-8", null)
                   } catch (e: Exception) {
-                      showStatus(context, manager, widgetId, context.getString(R.string.failed))
-                      onDone()
+                      finish(null)
                   }
               }
 
-              private fun widgetSizePx(context: Context, manager: AppWidgetManager, id: Int): Pair<Int, Int> {
-                  val opts = manager.getAppWidgetOptions(id)
-                  val density = context.resources.displayMetrics.density
-                  val portrait = context.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-                  val wKey = if (portrait) AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH else AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH
-                  val hKey = if (portrait) AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT else AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT
-                  val wDp = opts.getInt(wKey, 0).takeIf { it > 0 } ?: 300
-                  val hDp = opts.getInt(hKey, 0).takeIf { it > 0 } ?: 300
-                  return Pair((wDp * density).toInt(), (hDp * density).toInt())
+              private fun parse(jsResult: String?): List<String>? {
+                  if (jsResult == null || jsResult == "null") return null
+                  return try {
+                      val arr = JSONArray(JSONArray("[$jsResult]").getString(0))
+                      List(arr.length()) { arr.getString(it) }
+                  } catch (e: Exception) {
+                      null
+                  }
               }
 
-              private fun baseViews(context: Context): RemoteViews {
+              private fun buildViews(context: Context, today: String, tasks: List<String>?): RemoteViews {
+                  val pkg = context.packageName
+                  val res = context.resources
+                  fun id(name: String) = res.getIdentifier(name, "id", pkg)
                   val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-                  val openApp = PendingIntent.getActivity(
-                      context, 0, Intent(context, MainActivity::class.java), flags
+
+                  val views = RemoteViews(pkg, R.layout.widget)
+
+                  // 위젯을 누르면 앱에서 오늘 날짜의 to do list 창이 바로 열림
+                  val openToday = PendingIntent.getActivity(
+                      context, 2,
+                      Intent(context, MainActivity::class.java).putExtra(MainActivity.EXTRA_ADD_TODAY, true),
+                      flags
                   )
                   val refresh = PendingIntent.getBroadcast(
                       context, 1,
                       Intent(context, WebWidgetProvider::class.java).setAction(WebWidgetProvider.ACTION_REFRESH),
                       flags
                   )
-                  return RemoteViews(context.packageName, R.layout.widget).apply {
-                      setOnClickPendingIntent(R.id.widget_image, openApp)
-                      setOnClickPendingIntent(R.id.widget_status, refresh)
-                      setOnClickPendingIntent(R.id.widget_refresh, refresh)
+                  views.setOnClickPendingIntent(R.id.widget_root, openToday)
+                  views.setOnClickPendingIntent(R.id.widget_title, openToday)
+                  views.setOnClickPendingIntent(R.id.widget_add, openToday)
+                  views.setOnClickPendingIntent(R.id.widget_empty, if (tasks == null) refresh else openToday)
+
+                  if (tasks.isNullOrEmpty()) {
+                      views.setViewVisibility(R.id.widget_empty, View.VISIBLE)
+                      views.setTextViewText(
+                          R.id.widget_empty,
+                          context.getString(if (tasks == null) R.string.failed else R.string.empty)
+                      )
+                  } else {
+                      views.setViewVisibility(R.id.widget_empty, View.GONE)
                   }
+
+                  val shown = tasks.orEmpty().take(MAX_ROWS)
+                  for (i in 0 until MAX_ROWS) {
+                      val rowId = id("row$i")
+                      if (i >= shown.size) {
+                          views.setViewVisibility(rowId, View.GONE)
+                          continue
+                      }
+                      val text = shown[i]
+                      views.setViewVisibility(rowId, View.VISIBLE)
+                      views.setTextViewText(id("text$i"), text)
+                      views.setOnClickPendingIntent(rowId, openToday)
+
+                      val delete = PendingIntent.getBroadcast(
+                          context, 100 + i,
+                          Intent(context, WebWidgetProvider::class.java)
+                              .setAction(WebWidgetProvider.ACTION_DELETE)
+                              .putExtra(WebWidgetProvider.EXTRA_DATE, today)
+                              .putExtra(WebWidgetProvider.EXTRA_TEXT, text),
+                          flags
+                      )
+                      views.setOnClickPendingIntent(id("del$i"), delete)
+                  }
+
+                  val extra = tasks.orEmpty().size - shown.size
+                  if (extra > 0) {
+                      views.setViewVisibility(R.id.widget_more, View.VISIBLE)
+                      views.setTextViewText(R.id.widget_more, "외 ${extra}개 더")
+                      views.setOnClickPendingIntent(R.id.widget_more, openToday)
+                  } else {
+                      views.setViewVisibility(R.id.widget_more, View.GONE)
+                  }
+                  return views
               }
 
-              private fun pushBitmap(context: Context, manager: AppWidgetManager, id: Int, bitmap: Bitmap) {
-                  val views = baseViews(context).apply {
-                      setImageViewBitmap(R.id.widget_image, bitmap)
-                      setViewVisibility(R.id.widget_status, View.GONE)
+              // 자정이 지나면 다음 날 할 일로 바뀌도록 예약
+              private fun scheduleMidnightRefresh(context: Context) {
+                  val next = Calendar.getInstance().apply {
+                      add(Calendar.DAY_OF_YEAR, 1)
+                      set(Calendar.HOUR_OF_DAY, 0)
+                      set(Calendar.MINUTE, 0)
+                      set(Calendar.SECOND, 5)
+                      set(Calendar.MILLISECOND, 0)
                   }
-                  manager.updateAppWidget(id, views)
-              }
-
-              private fun showStatus(context: Context, manager: AppWidgetManager, id: Int, text: String) {
-                  val views = baseViews(context).apply {
-                      setTextViewText(R.id.widget_status, text)
-                      setViewVisibility(R.id.widget_status, View.VISIBLE)
-                  }
-                  // 기존 이미지는 그대로 두고 상태 문구만 겹쳐 표시
-                  manager.partiallyUpdateAppWidget(id, views)
+                  val refresh = PendingIntent.getBroadcast(
+                      context, 1,
+                      Intent(context, WebWidgetProvider::class.java).setAction(WebWidgetProvider.ACTION_REFRESH),
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+                  val alarm = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+                  alarm.set(AlarmManager.RTC, next.timeInMillis, refresh)
               }
           }
-          FILE_END_5
-          mkdir -p app/src/main/res/layout
-          cat > app/src/main/res/layout/widget.xml <<'FILE_END_6'
+          F5
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/item_bg.xml <<'F6'
           <?xml version="1.0" encoding="utf-8"?>
-          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#FFFFFF" />
+              <stroke android:width="1.5dp" android:color="#FDE8EE" />
+              <corners android:radius="12dp" />
+          </shape>
+          F6
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/widget_bg.xml <<'F7'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#FFFFFF" />
+              <stroke android:width="2dp" android:color="#F7C6D3" />
+              <corners android:radius="25dp" />
+          </shape>
+          F7
+          mkdir -p app/src/main/res/layout
+          L=app/src/main/res/layout/widget.xml
+          cat > $L <<'HEAD_END'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/widget_root"
               android:layout_width="match_parent"
               android:layout_height="match_parent"
-              android:background="@android:color/white">
+              android:orientation="vertical"
+              android:padding="20dp"
+              android:background="@drawable/widget_bg">
 
-              <ImageView
-                  android:id="@+id/widget_image"
+              <LinearLayout
                   android:layout_width="match_parent"
-                  android:layout_height="match_parent"
-                  android:scaleType="fitCenter"
-                  android:contentDescription="@string/app_name" />
+                  android:layout_height="wrap_content"
+                  android:layout_marginBottom="14dp"
+                  android:orientation="horizontal"
+                  android:gravity="center_vertical">
+
+                  <TextView
+                      android:id="@+id/widget_title"
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_weight="1"
+                      android:text="@string/title"
+                      android:textColor="#FF8FA3"
+                      android:textSize="17sp"
+                      android:textStyle="bold" />
+
+                  <TextView
+                      android:id="@+id/widget_add"
+                      android:layout_width="32dp"
+                      android:layout_height="32dp"
+                      android:gravity="center"
+                      android:text="+"
+                      android:textColor="#FCC3D2"
+                      android:textSize="24sp"
+                      android:contentDescription="@string/add" />
+              </LinearLayout>
 
               <TextView
-                  android:id="@+id/widget_status"
+                  android:id="@+id/widget_empty"
                   android:layout_width="match_parent"
-                  android:layout_height="match_parent"
-                  android:gravity="center"
-                  android:background="#CCFFFFFF"
-                  android:textColor="#555555"
-                  android:textSize="14sp"
-                  android:text="@string/loading" />
+                  android:layout_height="wrap_content"
+                  android:paddingTop="6dp"
+                  android:paddingBottom="6dp"
+                  android:text="@string/loading"
+                  android:textColor="#AAAAAA"
+                  android:textSize="14sp" />
+          HEAD_END
+          for i in 0 1 2 3 4 5 6 7; do
+          cat >> $L <<ROW_END
 
-              <ImageView
-                  android:id="@+id/widget_refresh"
-                  android:layout_width="32dp"
-                  android:layout_height="32dp"
-                  android:layout_gravity="top|end"
-                  android:layout_margin="4dp"
-                  android:padding="6dp"
-                  android:background="#55000000"
-                  android:src="@android:drawable/ic_popup_sync"
-                  android:contentDescription="@string/refresh" />
-          </FrameLayout>
-          FILE_END_6
+              <LinearLayout
+                  android:id="@+id/row$i"
+                  android:layout_width="match_parent"
+                  android:layout_height="46dp"
+                  android:layout_marginBottom="8dp"
+                  android:paddingStart="16dp"
+                  android:paddingEnd="4dp"
+                  android:orientation="horizontal"
+                  android:gravity="center_vertical"
+                  android:background="@drawable/item_bg"
+                  android:visibility="gone">
+
+                  <TextView
+                      android:id="@+id/text$i"
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_weight="1"
+                      android:maxLines="1"
+                      android:ellipsize="end"
+                      android:fontFamily="sans-serif-medium"
+                      android:textColor="#555555"
+                      android:textSize="15sp" />
+
+                  <TextView
+                      android:id="@+id/del$i"
+                      android:layout_width="40dp"
+                      android:layout_height="40dp"
+                      android:gravity="center"
+                      android:text="✕"
+                      android:textColor="#FCC3D2"
+                      android:textSize="16sp"
+                      android:contentDescription="@string/delete" />
+              </LinearLayout>
+          ROW_END
+          done
+          cat >> $L <<'TAIL_END'
+
+              <TextView
+                  android:id="@+id/widget_more"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:textColor="#AAAAAA"
+                  android:textSize="12sp"
+                  android:visibility="gone" />
+          </LinearLayout>
+          TAIL_END
           mkdir -p app/src/main/res/values
-          cat > app/src/main/res/values/strings.xml <<'FILE_END_7'
+          cat > app/src/main/res/values/strings.xml <<'F8'
           <resources>
-              <string name="app_name">웹 위젯</string>
-              <string name="widget_desc">웹페이지를 홈 화면에 표시합니다</string>
+              <string name="app_name">핑크 플래너</string>
+              <string name="widget_desc">오늘 할 일 목록을 표시합니다</string>
+              <string name="title">to do list</string>
               <string name="loading">불러오는 중…</string>
+              <string name="empty">오늘 할 일이 없어요 🌸</string>
               <string name="failed">불러오기 실패 · 탭해서 다시 시도</string>
-              <string name="refresh">새로고침</string>
+              <string name="add">할 일 추가</string>
+              <string name="delete">삭제</string>
           </resources>
-          FILE_END_7
+          F8
           mkdir -p app/src/main/res/xml
-          cat > app/src/main/res/xml/widget_info.xml <<'FILE_END_8'
+          cat > app/src/main/res/xml/widget_info.xml <<'F9'
           <?xml version="1.0" encoding="utf-8"?>
           <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
               android:minWidth="250dp"
               android:minHeight="180dp"
-              android:minResizeWidth="110dp"
+              android:minResizeWidth="180dp"
               android:minResizeHeight="110dp"
               android:targetCellWidth="4"
               android:targetCellHeight="3"
@@ -374,18 +548,18 @@ jobs:
               android:widgetCategory="home_screen"
               android:description="@string/widget_desc"
               android:initialLayout="@layout/widget" />
-          FILE_END_8
-          cat > build.gradle.kts <<'FILE_END_9'
+          F9
+          cat > build.gradle.kts <<'F10'
           plugins {
               id("com.android.application") version "8.5.2" apply false
               id("org.jetbrains.kotlin.android") version "1.9.24" apply false
           }
-          FILE_END_9
-          cat > gradle.properties <<'FILE_END_10'
+          F10
+          cat > gradle.properties <<'F11'
           org.gradle.jvmargs=-Xmx2048m
           kotlin.code.style=official
-          FILE_END_10
-          cat > settings.gradle.kts <<'FILE_END_11'
+          F11
+          cat > settings.gradle.kts <<'F12'
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
           }
@@ -394,11 +568,11 @@ jobs:
           }
           rootProject.name = "WebWidget"
           include(":app")
-          FILE_END_11
+          F12
       - name: Build
         working-directory: proj
         run: gradle assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: web-widget-apk
+          name: todo-list-widget-apk
           path: proj/app/build/outputs/apk/debug/app-debug.apk
